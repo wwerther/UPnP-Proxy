@@ -1,0 +1,94 @@
+Squid as UPnP proxy for MediaTomb serving content to PS3
+
+This is only a short and very rough HowTo about connecting an external UPNP-Mediaserver to your local PS3 using squid as a proxy to avoid latency problems on the internet.
+Idea
+
+Nowadays I was facing the problem that I wanted to utilize a friends Media-Server within my local LAN. Since UPnP only works within a single-network segment I needed some kind of a "proxy", that advertises the capabilities of the media-server within my network.
+All steps that I've described here are still work in progress. The code is not very nice yet and most of it is still just a proof-of-concept. Nevertheless it's working :)
+The situation
+
+pages/04projects/04upnpsquidproxy/schema.jpg
+
+
+Tools & Hints
+My first idea was to extend the MediaTomb software that is already running on my local server, but soon I found that I had to less practice with coding in C. So I was searching for some alternatives in other programming languages that I'm more familiar with. I ended up with "good old" Perl :-)
+I also found some help for the first-start at Sourceforge. Also the German Wikipedia explained the mechanism of Upnp-advertisments quite well. Based on this information I was really emphasised and thought this will be an easy to solve problem.
+A very handy tool is Cidero. It helps you to find out wether or not you receive your UPnP-advertisments.
+In the beginnig everything looked quite easy. My plan was to write a small daemon that should run on my local machine and simply send the SSDP messages for the foreign server. Therefore I only need to take the default-SSDP and push it periodically to 239.255.255.250 port 1900 of course using UDP :)
+
+Source-Code using parser for type:
+
+   1.
+      NOTIFY * HTTP/1.1
+   2.
+      HOST: 239.255.255.250:1900
+   3.
+      SERVER: Linux/2.6.15.2 UPnP/1.0 Mediaserver/1.0
+   4.
+      CACHE-CONTROL: max-age=1800
+   5.
+      LOCATION: http://192.168.0.10:8080/description.xml
+   6.
+      NTS: ssdp:alive
+   7.
+      NT: urn:schemas-upnp-org:service:ConnectionManager:1
+   8.
+      USN: uuid:550e8400-e29b-11d4-a716-446655440000::urn:schemas-upnp-org:service:ConnectionManager:1
+
+Parsed in 0.000 seconds, using GeSHi 1.0.7.20
+
+
+Well it turned out, that this did not work. Using tcpdump and wireshark I found that a media-server is sending more than only one advertisment. It advertises all single services it provides. So I ended up in sending 5 SSDP messages:
+
+Source-Code using parser for type:
+
+   1.
+      the so called "upnp:rootdevice"
+   2.
+      the USN it self
+   3.
+      urn:schemas-upnp-org:device:MediaServer:1
+   4.
+      urn:schemas-upnp-org:service:ConnectionManager:1
+   5.
+      urn:schemas-upnp-org:service:ContentDirectory:1
+
+Parsed in 0.000 seconds, using GeSHi 1.0.7.20
+
+
+The solution
+I implemented all of this and the foreign media-server showed up in the cidero-controller and I was happy. Immediatly after that I switched on my PS3 and was disappointed. For what-ever reason the device didn't show up. Anyway my local MediaTomb did, so it couldn't be a network-problem.
+After some tests I found out, that the PS3 is a little bit picky regarding the advertisments. It seems like it is not possible to send an advertisment from a different IP address than the one that is offering the service. It also seems like the PS3 is double-checking the IGMP-memberships and comparing the advertisment records to the IP of the sender.
+It was hard to know what to do now. I didn't want to copy all the content of the foreign server to my local machine and I also didn't want to dump all advertisments and xml-documents manually to my system.
+What I ended up with is the following trick:
+
+    * my local upnp-proxy advertises the foreign USN on it's local IP-address and port (but it does not handle the port)
+    * I added a rule in IP-tables that redirects all traffic going to my local system to the foreign-IP address
+
+      DNAT       tcp  --  eth0   *       0.0.0.0/0            10.16.1.15          tcp dpt:49152 to:10.0.3.252:49152
+
+
+This worked quite well. I was able to see the media-server within Cidero and on my PS3. I was also able to choose some songs and play then. But now I was facing a bigger problem. The music had interruptions from time to time. It's not very funny to listen to music that stucks within the track. I soon found that the latency within the network has to be the reason. 40-50 ms round-trip seems to be to high for the buffer that the PS3 uses. A tcp-dump showed a lot of interrupted tracks and partially requested content. So I had to find a buffering solution. Since all data is transferred via HTTP my decision was to use SQUID for it and install it as a transparent proxy :)
+
+What I ended up with is the following scenario:
+
+- All messages going to the foreign media-server (correct port) received on my primary interface will be forwarded to the transparent-proxy (on a different local-IP).
+- The HTTP-headers are set correctly by the media-player so Squid knows where to get the real data from. 
+    DNAT       tcp  --  eth0   *       0.0.0.0/0            10.0.3.252          tcp dpt:49152 to:10.16.1.20:49153
+
+The foreign-network is connected via an open-VPN connection that is also terminated on my server. So I need a MASQUERADE rule in the POSTROUTING process. Hey! This is great I thought. Now SQUID is in between and everything will work. => Nope! I was wrong. The music still stucked. It took a while until I found the prefetch- parameters for the partial content. Here they are:
+
+    cache_mem 32 MB
+    maximum_object_size_in_memory 8 MB
+    maximum_object_size 20480 KB
+    read_ahead_gap 20 MB
+    range_offset_limit 20 MB
+
+I had to deactivate this line as well:
+
+    #refresh_pattern -i (/cgi-bin/|?) 0    0%  0
+
+
+Now everything is working quite good, but I'm sure the squid-parameters still can be optimized a little bit. It tooks 1-2 seconds until a track starts, but then it streams without interruption.
+I don't know if this also works with videos. Maybe the Squid-Settings have to be adjusted. Of course if the video has more bandwidth than you can download you need a bigger buffer. I don't know how good this will really work. For MP3 it's absolutely fine.
+
